@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "splinebench"
+version = "0.1.0"
+description = "Synthetic sample-efficiency benchmark for snappy-motion spline parameterizations"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "matplotlib>=3.7",
+    "pandas>=2.0",
+]
+
+[project.optional-dependencies]
+neural = ["torch>=2.0"]
+dev = ["pytest>=7"]
+
+[tool.setuptools.packages.find]
+include = ["splinebench*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
