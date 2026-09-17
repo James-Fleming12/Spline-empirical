@@ -8,7 +8,7 @@ A synthetic, reproducible testbed for answering one question:
 > sparse noisy observations?**
 
 This repository is the companion instrument to
-`/home/james/Research/Rendering/SplineGS-empirical`, whose README documents
+`SplineGS-empirical`, whose README documents
 that the per-Gaussian cubic Hermite spline in **SplineGS** (Park et al.,
 [`park2024splinegs`]) and its successor WebSpline fail on (H2) velocity
 discontinuities, snap-rest-snap and near-Nyquist motion, and that no method in
@@ -298,7 +298,118 @@ seed/motion/budget grid.
 | `results/starter_pareto.png` | `--plots results/starter` | TBD |
 | robustness plot | `plots.plot_robustness` | TBD |
 
-## 7. Hypotheses and practical tips
+## 7. Takeaways and analysis (placeholders)
+
+> Fill this section **after** the suites complete, from the aggregate CSV and
+> plots. Suggested order: run `--report` per suite, then quote effect sizes
+> (mean ± sd over seeds) rather than single points. Keep every claim tied to
+> a table/figure and to a row of Section 6.
+
+### 7.1 Executive summary
+
+TBD — one paragraph, answering: which tuple wins overall on the
+accuracy/smoothness/sample/cost trade-off, and what is the single biggest
+lever (representation vs knot placement vs sampler vs regularization).
+
+Fill from: Section 6.1 (AULC column), Section 6.6 Pareto figure.
+
+### 7.2 Findings by research question
+
+| RQ | Answer (one line) | Best method(s) | Effect vs runner-up | Hypothesis verdict | Evidence |
+|---|---|---|---|---|---|
+| RQ1 sample efficiency | TBD | TBD | TBD | H1/H3/H4/H7 | 6.1, 6.6 |
+| RQ2 snappy/high-freq fidelity | TBD | TBD | TBD | H2/H4 | 6.1, 6.2 |
+| RQ3 knot placement | TBD | TBD | TBD | H1 | 6.3 |
+| RQ4 fitting/regularization | TBD | TBD | TBD | H3/H5 | 6.4 |
+| RQ5 sampling strategy | TBD | TBD | TBD | H6 | 6.5 |
+| RQ6 cost / Pareto | TBD | TBD | TBD | — | 6.6 |
+
+### 7.3 Motion-class playbook
+
+| Motion class | Best representation + knots | Best sampler | Degradation mode to watch | Takeaway |
+|---|---|---|---|---|
+| smooth (`orbit`) | TBD | TBD | TBD | TBD |
+| snap / snap-rest (`staccato`, `double_step`) | TBD | TBD | TBD | TBD |
+| kinks / impacts (`bounce`, `contact_drop`, `pulses`) | TBD | TBD | TBD | TBD |
+| bang-bang (`bang_bang`) | TBD | TBD | TBD | TBD |
+| near-Nyquist / chirp (`wobble`, `chirp`, `combo`) | TBD | TBD | TBD | TBD |
+
+Fill from: Section 6.1 rows and 6.2 higher-derivative columns
+(`vel_rmse`, `jerk_rmse`, `peak_time_err`, `overshoot`).
+
+### 7.4 Hypothesis verdicts
+
+| ID | Verdict (supported / falsified / partial) | Evidence | Notes |
+|---|---|---|---|
+| H1 adaptive placement beats uniform at low budget | TBD | 6.3 | TBD |
+| H2 piecewise beats global bases on kinks | TBD | 6.1, 6.2 | TBD |
+| H3 P-spline beats plain LS at low budget under noise | TBD | 6.4 | TBD |
+| H4 Matérn GP leads on smooth, over-smooths on kinks | TBD | 6.1, 6.2 | TBD |
+| H5 robust losses only help with outliers | TBD | 6.4 | TBD |
+| H6 derivative-aware sampling helps most at 5–20 | TBD | 6.5 | TBD |
+| H7 neural needs ~10× samples but may win on `combo` | TBD | 6.1, 6.6 | TBD |
+
+### 7.5 Cross-cutting takeaways
+
+- **Representation vs placement.** TBD — how much of the error is basis
+  error vs knot-placement error (compare 6.3 `uniform` vs adaptive at equal
+  `n_params_total`)? Fill from the 6.3 gap and the 6.1 parameter counts.
+- **Dimensionality of the win.** TBD — is the winner's advantage in position,
+  or only in higher derivatives/peak timing? Quote `vel/acc/jerk_rmse` and
+  `peak_time_err` from 6.2.
+- **Noise robustness.** TBD — which methods keep rank order as
+  `noise_std`/`outlier_frac` grow, and which collapse? Fill from 6.4.
+- **Oracle vs realistic.** TBD — compare `*_uses_gt=True` rows to realistic
+  rows (records carry the flags; split the CSV on them).
+- **Cost.** TBD — state the accuracy-per-parameter and accuracy-per-second
+  frontier (6.6) and whether the winner is deployable at SplineGS-class
+  storage (`n_params_total`, `n_data_params`).
+- **Timing law.** TBD — does chord/centripetal/accel time parameterization
+  change the ranking (compare `time_param` groups)?
+
+### 7.6 Negative and surprising results
+
+- TBD — method families that underperformed their reputation (e.g. NURBS
+  weights optimization, BO knots, TV regularization) and the plausible
+  reason.
+- TBD — any case where more knots/samples made things worse
+  (overfitting/ill-conditioning), with the seed spread.
+
+Fill from: raw JSONL (`results/*.jsonl`), `--report` tables, and the
+`reg_lam`/`n_sites` sweep rows.
+
+### 7.7 Crossover and operating-point analysis
+
+| Question | Budget where ranked order changes | Before | After | Evidence |
+|---|---|---:|---|---|
+| lowest budget for 1% position error | TBD | TBD | TBD | 6.1 |
+| lowest budget for monotone winner | TBD | TBD | TBD | 6.1 |
+| budget where P-spline advantage vanishes | TBD | TBD | TBD | 6.4 |
+| budget where GP advantage vanishes | TBD | TBD | TBD | 6.1 |
+
+### 7.8 Threats to validity
+
+- TBD — synthetic observation model vs real GS tracks (i.i.d. noise only;
+  no colored/heteroscedastic noise yet).
+- TBD — motion set coverage and normalization choices.
+- TBD — oracle-dependent samplers/placers (`*_uses_gt`) inflating a method's
+  apparent sample efficiency.
+- TBD — seed count and the multiple-comparison burden of the full matrix.
+
+### 7.9 Recommended follow-up experiments
+
+Ranked, each as a concrete suite/condition change:
+
+1. TBD — e.g. add periodic B-splines and spline + GP residual if the
+   placement results leave unexplained error.
+2. TBD — e.g. AR(1)/heteroscedastic noise robustness for the leading
+   method.
+3. TBD — e.g. per-Gaussian storage/latency projection onto the SplineGS
+   setting (`n_params_total` × Gaussian count).
+4. TBD — e.g. orientation/SO(3) extension once translation ordering is
+   settled.
+
+## 8. Hypotheses and practical tips
 
 Hypotheses this harness is designed to falsify:
 
@@ -333,7 +444,7 @@ Practical guidance carried over from the SplineGS-empirical study:
 - compare at 5–20 samples, not only at the final budget — that is where
   sample efficiency lives.
 
-## 8. Repo layout
+## 9. Repo layout
 
 ```
 splinebench/
