@@ -46,7 +46,8 @@ def test_metrics_finite_on_real_fit():
     tp = timeparam.build("linear")
     tp.fit(t, y)
     out = metrics.evaluate(motion, rep, tp, u_train=t, y_train=y, fit_time_s=0.01)
-    for key in ("pos_rmse", "vel_rmse", "jerk_rmse", "snap_rmse", "overshoot", "settle_time_err",
+    for key in ("pos_rmse", "vel_rmse", "jerk_rmse", "snap_rmse", "vel_nrmse", "acc_nrmse",
+                "jerk_nrmse", "snap_nrmse", "overshoot", "settle_time_err",
                 "isj_ratio", "fit_time_s", "train_rmse", "n_params_total"):
         assert key in out
         assert np.isfinite(out[key]), key

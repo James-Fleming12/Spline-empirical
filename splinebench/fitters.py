@@ -89,14 +89,22 @@ def _huber(A, y, w, reg, delta=None, iters=30):
     return coeffs
 
 
+def _trimmed_score(A, y, w, c, tau=0.8):
+    r = np.linalg.norm((A @ c - y) * w[:, None], axis=1)
+    keep = max(1, int(tau * len(r)))
+    return float(np.mean(np.sort(r**2)[:keep]))
+
+
 def _ransac(A, y, w, reg, seed, n_trials=200, thresh_scale=2.5):
     rng = np.random.default_rng(seed)
     n, k = A.shape
+    ls = _solve(A, y, w, reg)
     if n <= k:
-        return _solve(A, y, w, reg)
+        return ls
     base = _solve(A, y, w, None)
     r0 = np.linalg.norm((A @ base - y) * w[:, None], axis=1)
-    scale = 1.4826 * np.median(np.abs(r0 - np.median(r0))) + 1e-12
+    mad = 1.4826 * np.median(np.abs(r0 - np.median(r0)))
+    scale = max(mad, 1e-6 * (float(np.sqrt(np.mean(y**2))) + 1e-12))
     thresh = max(thresh_scale * scale, 1e-9)
     best_mask = None
     best_score = -1
@@ -112,9 +120,12 @@ def _ransac(A, y, w, reg, seed, n_trials=200, thresh_scale=2.5):
         score = int(inl.sum())
         if score > best_score:
             best_score, best_mask = score, inl
-    if best_mask is None or best_mask.sum() < k:
-        return _solve(A, y, w, reg)
-    return _solve(A[best_mask], y[best_mask], w[best_mask], reg)
+    if best_mask is None or best_mask.sum() < max(k + 1, int(0.6 * n)):
+        return ls
+    candidate = _solve(A[best_mask], y[best_mask], w[best_mask], reg)
+    if _trimmed_score(A, y, w, candidate) <= _trimmed_score(A, y, w, ls):
+        return candidate
+    return ls
 
 
 def _sklearn_linear(A, y, fitter, reg, seed, **kw):

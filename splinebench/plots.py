@@ -68,10 +68,10 @@ def plot_robustness(df, out, metric="pos_rmse"):
     for rep, g in data.groupby("representation"):
         curve = g.groupby("noise_label")[metric].mean()
         ax.plot(curve.index, curve.values, marker="o", label=str(rep))
-    ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right", fontsize=7)
     ax.set_ylabel(metric)
     ax.grid(alpha=0.3)
     ax.legend(fontsize=7)
+    ax.tick_params(axis="x", rotation=30, labelsize=7)
     fig.tight_layout()
     fig.savefig(out, dpi=160)
     plt.close(fig)

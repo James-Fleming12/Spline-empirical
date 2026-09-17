@@ -183,6 +183,18 @@ class PiecewiseLinear(LinearBasis):
         return out
 
 
+def _interior_sites(positions):
+    if positions is None:
+        return np.linspace(0.0, 1.0, 8)[1:-1]
+    values = np.asarray(positions, dtype=float).ravel()
+    values = np.unique(values[(values > 1e-6) & (values < 1.0 - 1e-6)])
+    keep = []
+    for value in values:
+        if not keep or value - keep[-1] >= 1e-4:
+            keep.append(float(value))
+    return np.asarray(keep, dtype=float)
+
+
 class BSpline(LinearBasis):
     name = "bspline"
     citation = "deboor1978"
@@ -190,10 +202,7 @@ class BSpline(LinearBasis):
     def __init__(self, positions=None, dim=DEFAULT_DIM, degree=3, seed=0, **kw):
         super().__init__(positions, dim, seed, **kw)
         self.degree = int(degree)
-        interior = np.linspace(0.0, 1.0, 8)[1:-1] if positions is None else np.asarray(positions, dtype=float).ravel()
-        interior = np.unique(np.clip(interior, 1e-9, 1.0 - 1e-9))
-        if len(interior) > 1:
-            interior = interior[np.r_[True, np.diff(interior) > 1e-9]]
+        interior = _interior_sites(positions)
         self.knots = np.concatenate([[0.0] * (self.degree + 1), interior, [1.0] * (self.degree + 1)])
         self.n_basis = len(self.knots) - self.degree - 1
         self._mats = _bspline_derivative_matrices(self.knots, self.degree, MAX_ORDER)
@@ -310,10 +319,7 @@ class NURBS(Representation):
     def __init__(self, positions=None, dim=DEFAULT_DIM, degree=3, optimize_weights=False, seed=0, **kw):
         super().__init__(positions, dim, seed, **kw)
         self.degree = int(degree)
-        interior = np.linspace(0.0, 1.0, 8)[1:-1] if positions is None else np.asarray(positions, dtype=float).ravel()
-        interior = np.unique(np.clip(interior, 1e-9, 1.0 - 1e-9))
-        if len(interior) > 1:
-            interior = interior[np.r_[True, np.diff(interior) > 1e-9]]
+        interior = _interior_sites(positions)
         self.knots = np.concatenate([[0.0] * (self.degree + 1), interior, [1.0] * (self.degree + 1)])
         self.n_basis = len(self.knots) - self.degree - 1
         self.optimize_weights = bool(optimize_weights)
@@ -474,9 +480,13 @@ class GaussianProcess(Representation):
                 if len(dq) < len(q):
                     dq = np.concatenate([dq, np.zeros(len(q) - len(dq))])
                 q = dq - aa * q
+            s = np.abs(tau)
             if len(q) == 0 or not q.any():
                 return np.zeros_like(tau)
-            return polyval(tau, q) * np.exp(-aa * np.abs(tau))
+            val = polyval(s, q) * np.exp(-aa * s)
+            if order > 0:
+                val = val * np.sign(tau) ** order
+            return val
         x = tau / l
         if order == 0:
             return sf2 * np.exp(-0.5 * x**2)
@@ -513,11 +523,16 @@ class GaussianProcess(Representation):
         y_var = float(np.var(self.targets)) + 1e-12
         self.log_params = np.array([np.log(span / 5.0), np.log(y_var), np.log(max(1e-6, 1e-4 * y_var))])
         if self.optimize and len(self.inputs) >= 4:
+            noise_floor = max(1e-8 * y_var, 1e-12)
             res = minimize(
                 self._neg_log_marginal,
                 self.log_params,
                 method="L-BFGS-B",
-                bounds=[(np.log(1e-3), np.log(1e3)), (np.log(1e-8), np.log(1e4)), (np.log(1e-10), np.log(1e0))],
+                bounds=[
+                    (np.log(1e-3), np.log(1e3)),
+                    (np.log(1e-8), np.log(1e4)),
+                    (np.log(noise_floor), np.log(max(1.0, y_var))),
+                ],
                 options={"maxiter": 200},
             )
             self.log_params = res.x

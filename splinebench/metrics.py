@@ -25,6 +25,9 @@ def evaluate(motion, rep, time_param, grid=None, limits=None, fit_time_s=None,
     for k, name in ORDER_NAMES.items():
         err = state_fit[..., k] - state_gt[..., k]
         out[f"{name}_rmse"] = float(np.sqrt(np.mean(err**2)))
+        if k > 0:
+            gt_rms = float(np.sqrt(np.mean(state_gt[..., k] ** 2)))
+            out[f"{name}_nrmse"] = float(out[f"{name}_rmse"] / (gt_rms + 1e-12))
         if k == 0:
             out["pos_mae"] = float(np.mean(np.abs(err)))
             out["pos_max"] = float(np.max(np.linalg.norm(err, axis=1)))
