@@ -201,6 +201,203 @@ def full_conditions():
     )
 
 
+# ---------------------------------------------------------------------------
+# Iteration 2: stress the Iteration 1 winners (GP-Matern, adaptive knots,
+# penalized cubic B-splines, Sobol) under realistic noise, time
+# parameterization, extrapolation, adversarial conditioning and auto-tuned
+# knot/penalty counts.
+# ---------------------------------------------------------------------------
+
+I2_SEEDS = [0, 1, 2, 3, 4]
+I2_QUICK_SEEDS = [0, 1, 2]
+I2_BUDGETS = [10, 20, 50]
+I2_ALL_MOTIONS = [
+    "orbit", "staccato", "double_step", "bang_bang", "bounce",
+    "pulses", "wobble", "chirp", "combo", "contact_drop",
+]
+
+# (representation, knots, fitter, reg_kind, reg_lam)
+I2_NOISE_METHODS = [
+    ("gp_matern52", "uniform", "least_squares", "none", 0.0),
+    ("pspline", "split_merge", "least_squares", "diff", 1e-3),
+    ("hermite", "feature_peaks", "huber", "none", 0.0),
+    ("catmull_rom", "uniform", "least_squares", "none", 0.0),
+    ("bspline3", "split_merge", "ransac", "none", 0.0),
+]
+I2_NOISE_MODELS = [
+    ("iid", {}),
+    ("ar1_0.90", {"ar1_rho": 0.90}),
+    ("ar1_0.98", {"ar1_rho": 0.98}),
+    ("hetero_speed", {"hetero": 2.0}),
+    ("speed_outliers", {"speed_outlier": 0.15}),
+    ("missing_bursts", {"missing_bursts": 2}),
+    ("quantized", {"quantize": 0.02}),
+    ("axis_corr", {"axis_corr": 0.85}),
+    ("bias_drift", {"bias_drift": 0.05}),
+]
+
+
+def _method_row(rep, knot, fitter, reg_kind, reg_lam, motions, budgets, seeds, **extra):
+    return {
+        "representation": [rep],
+        "knots": [knot],
+        "fitter": [fitter],
+        "reg_kind": [reg_kind],
+        "reg_lam": [reg_lam],
+        "reg_order": [2],
+        "sampling": ["random"],
+        "time_param": ["linear"],
+        "motion": motions,
+        "budget": budgets,
+        "seed": seeds,
+        **extra,
+    }
+
+
+def iteration2_core_conditions(quick=True):
+    seeds = I2_QUICK_SEEDS if quick else I2_SEEDS
+    reps = [
+        ("gp_matern52", "uniform", "least_squares", "none", 0.0),
+        ("gp_rbf", "uniform", "least_squares", "none", 0.0),
+        ("pspline", "split_merge", "least_squares", "diff", 1e-3),
+        ("bspline3", "split_merge", "least_squares", "none", 0.0),
+        ("catmull_rom", "uniform", "least_squares", "none", 0.0),
+        ("hermite", "feature_peaks", "least_squares", "none", 0.0),
+    ]
+    rows = [
+        _method_row(rep, kn, ft, rk, rl, I2_ALL_MOTIONS, I2_BUDGETS, seeds, noise_std=[0.01])
+        for rep, kn, ft, rk, rl in reps
+    ]
+    return expand(rows)
+
+
+def iteration2_noise_conditions(quick=True):
+    seeds = I2_QUICK_SEEDS if quick else I2_SEEDS
+    rows = []
+    for name, nkw in I2_NOISE_MODELS:
+        for rep, kn, ft, rk, rl in I2_NOISE_METHODS:
+            rows.append(
+                _method_row(
+                    rep, kn, ft, rk, rl,
+                    ["staccato", "bounce", "wobble"], [20, 50], seeds,
+                    noise_std=[0.01], noise_kwargs=[dict(nkw)],
+                )
+            )
+    return expand(rows)
+
+
+def iteration2_timeparam_conditions(quick=True):
+    seeds = I2_QUICK_SEEDS if quick else I2_SEEDS
+    reps = [
+        ("gp_matern52", "uniform", "least_squares", "none", 0.0),
+        ("pspline", "split_merge", "least_squares", "diff", 1e-3),
+        ("bspline3", "split_merge", "least_squares", "none", 0.0),
+    ]
+    rows = []
+    for rep, kn, ft, rk, rl in reps:
+        for tp, oracle in itertools.product(["linear", "chord", "centripetal", "accel", "jerk"], [False, True]):
+            rows.append(
+                _method_row(
+                    rep, kn, ft, rk, rl,
+                    ["staccato", "double_step", "wobble"], [20, 50], seeds,
+                    noise_std=[0.01], time_param=[tp], time_param_oracle=[oracle],
+                )
+            )
+    return expand(rows)
+
+
+def iteration2_extrapolation_conditions(quick=True):
+    seeds = I2_QUICK_SEEDS if quick else I2_SEEDS
+    reps = [
+        ("gp_matern52", "uniform", "least_squares", "none", 0.0),
+        ("gp_rbf", "uniform", "least_squares", "none", 0.0),
+        ("pspline", "split_merge", "least_squares", "diff", 1e-3),
+        ("bspline3", "split_merge", "least_squares", "none", 0.0),
+        ("catmull_rom", "uniform", "least_squares", "none", 0.0),
+        ("hermite", "feature_peaks", "least_squares", "none", 0.0),
+    ]
+    rows = []
+    for rep, kn, ft, rk, rl in reps:
+        for split in ["none", "early", "late", "middle", "interp"]:
+            rows.append(
+                _method_row(
+                    rep, kn, ft, rk, rl,
+                    ["staccato", "bounce", "chirp"], [20, 50], seeds,
+                    noise_std=[0.01], split=[split],
+                )
+            )
+    return expand(rows)
+
+
+def iteration2_adversarial_conditions(quick=True):
+    seeds = I2_QUICK_SEEDS if quick else I2_SEEDS
+    rows = [
+        _method_row("bspline3", "uniform", "least_squares", "none", 0.0,
+                    ["staccato", "bounce", "wobble"], [50], seeds, noise_std=[0.01]),
+        _method_row("bspline3", "clustered", "least_squares", "none", 0.0,
+                    ["staccato", "bounce", "wobble"], [50], seeds, noise_std=[0.01],
+                    knot_kwargs=[{"mode": "cluster"}]),
+        _method_row("bspline3", "clustered", "least_squares", "diff", 1e-3,
+                    ["staccato", "bounce", "wobble"], [50], seeds, noise_std=[0.01],
+                    knot_kwargs=[{"mode": "cluster"}]),
+        _method_row("bspline5", "clustered", "least_squares", "none", 0.0,
+                    ["staccato", "bounce", "wobble"], [50], seeds, noise_std=[0.01],
+                    knot_kwargs=[{"mode": "cluster"}]),
+        _method_row("bspline5", "clustered", "least_squares", "diff", 1e-3,
+                    ["staccato", "bounce", "wobble"], [50], seeds, noise_std=[0.01],
+                    knot_kwargs=[{"mode": "cluster"}]),
+        _method_row("bspline7", "clustered", "least_squares", "none", 0.0,
+                    ["staccato", "bounce", "wobble"], [50], seeds, noise_std=[0.01],
+                    knot_kwargs=[{"mode": "cluster"}]),
+        _method_row("bspline7", "clustered", "least_squares", "diff", 1e-3,
+                    ["staccato", "bounce", "wobble"], [50], seeds, noise_std=[0.01],
+                    knot_kwargs=[{"mode": "cluster"}]),
+        _method_row("bspline3", "clustered", "least_squares", "none", 0.0,
+                    ["staccato", "bounce", "wobble"], [50], seeds, noise_std=[0.01],
+                    knot_kwargs=[{"mode": "near_duplicate"}]),
+        _method_row("bspline3", "clustered", "least_squares", "none", 0.0,
+                    ["staccato", "bounce", "wobble"], [50], seeds, noise_std=[0.01],
+                    knot_kwargs=[{"mode": "one_gap"}]),
+        _method_row("hermite", "clustered", "least_squares", "none", 0.0,
+                    ["staccato", "bounce", "wobble"], [50], seeds, noise_std=[0.01],
+                    knot_kwargs=[{"mode": "cluster"}]),
+        _method_row("pspline", "clustered", "least_squares", "diff", 1e-3,
+                    ["staccato", "bounce", "wobble"], [50], seeds, noise_std=[0.01],
+                    knot_kwargs=[{"mode": "cluster"}]),
+    ]
+    return expand(rows)
+
+
+def iteration2_knotcount_conditions(quick=True):
+    seeds = I2_QUICK_SEEDS if quick else I2_SEEDS
+    methods = [
+        ("pspline", "split_merge", "none", 0.0),
+        ("pspline", "cv", "none", 0.0),
+        ("pspline_gcv", "split_merge", "none", 0.0),
+        ("bspline3", "split_merge", "none", 0.0),
+        ("bspline3", "cv", "none", 0.0),
+        ("bspline3", "split_merge", "diff", 1e-3),
+    ]
+    rows = [
+        _method_row(rep, kn, "least_squares", rk, rl,
+                    ["staccato", "double_step", "bounce", "wobble"], [20, 50], seeds,
+                    noise_std=[0.01])
+        for rep, kn, rk, rl in methods
+    ]
+    return expand(rows)
+
+
+def iteration2_conditions(quick=True):
+    return (
+        iteration2_core_conditions(quick=quick)
+        + iteration2_noise_conditions(quick=quick)
+        + iteration2_timeparam_conditions(quick=quick)
+        + iteration2_extrapolation_conditions(quick=quick)
+        + iteration2_adversarial_conditions(quick=quick)
+        + iteration2_knotcount_conditions(quick=quick)
+    )
+
+
 SUITES = {
     "smoke": smoke_conditions,
     "starter": starter_conditions,
@@ -209,6 +406,13 @@ SUITES = {
     "sampling": sampling_conditions,
     "robustness": robustness_conditions,
     "full": full_conditions,
+    "i2_core": iteration2_core_conditions,
+    "i2_noise": iteration2_noise_conditions,
+    "i2_timeparam": iteration2_timeparam_conditions,
+    "i2_extrap": iteration2_extrapolation_conditions,
+    "i2_adversarial": iteration2_adversarial_conditions,
+    "i2_knotcount": iteration2_knotcount_conditions,
+    "iteration2": iteration2_conditions,
 }
 
 

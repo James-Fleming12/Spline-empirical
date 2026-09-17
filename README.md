@@ -18,12 +18,16 @@ spline-class methods are the fastest to evaluate and the only ones with
 editability, so the open slot is a **sample-efficient, noise-robust,
 non-uniform/growth-capable spline** — exactly what this benchmark measures.
 
-> **Status: v0.2, first results in.** All registries, the synthetic motion
-> suite, the runner and **109 tests** are implemented and green. Sections 6
-> and 7 are populated from the quick suites plus targeted supplementary runs
-> (2 703 deduplicated conditions, 3 seeds each; see §5 for the exact
-> commands). The `--full` grids remain to be run; tables and analysis are
-> reproducible from `results/*.jsonl` via `splinebench.report`.
+> **Status: v0.3, Iteration 2 in.** All registries, the synthetic motion
+> suite, the runner and **131 tests** are implemented and green. Section 6–7
+> are the first-pass results (2 703 deduplicated conditions, 3 seeds; see §5).
+> **Section 8 is the Iteration 2 stress test** of the first-pass winners
+> (GP-Matérn, adaptive knots, penalized cubic B-splines, Sobol): realistic
+> structured noise, time-parameterization, extrapolation, adversarial
+> conditioning and auto-tuned knot/penalty counts, over 4 455 conditions ×
+> 3–5 seeds. Tables in §6 and §8 are reproducible from `results/*.jsonl` and
+> `results/iteration2/*.jsonl` via `splinebench.report`; the `--full` grids
+> remain to be run.
 
 ---
 
@@ -95,6 +99,7 @@ never rely on finite differences.
 | `catmull_rom` | uniform Catmull-Rom | `K·D` | implemented | [`catmull1974`] |
 | `bspline2/3/5/7` | clamped B-spline, degree 2/3/5/7 | `(m+k+1)·D` | implemented | [`deboor1978`] |
 | `pspline` | B-spline + difference penalty | `(m+k+1)·D` | implemented | [`eilers1996`] |
+| `pspline_gcv` | P-spline with GCV-selected penalty | `(m+k+1)·D` | implemented (I2) | [`wahba1990`] |
 | `chebyshev` | Chebyshev polynomial basis | `(d+1)·D` | implemented | [`trefethen2013`] |
 | `fourier` | truncated Fourier series | `(2H+1)·D` | implemented | — |
 | `nurbs` | rational B-spline, fixed or optimized weights | `K·D (+K)` | implemented | [`piegl1995`] |
@@ -113,10 +118,13 @@ concern.
 
 Implemented: `uniform`, `quantile`, `chord`, `centripetal`, `curvature`,
 `feature_peaks` (velocity/acceleration/jerk extrema + acceleration reversals),
-`rdp`, `split_merge` (recursive max-residual bisection), `greedy` (forward
-selection with a linear/real-representation objective), `kmeans` (weighted on
-derivative density), `farthest_point`, `bayesopt` (GP-EI over knot
-locations), `active_residual` (iterative residual-driven insertion).
+`rdp`, `split_merge` (recursive max-residual bisection), `cv` (K-fold
+cross-validation over the **number** of knots, Iteration 2), `clustered`
+(adversarial cluster / near-duplicate / one-gap / endpoint layouts, Iteration
+2), `greedy` (forward selection with a linear/real-representation objective),
+`kmeans` (weighted on derivative density), `farthest_point`, `bayesopt`
+(GP-EI over knot locations), `active_residual` (iterative residual-driven
+insertion).
 
 ### 3.3 Fitting / optimization
 
@@ -148,7 +156,27 @@ estimate them from a pilot sample.
 Gaussian i.i.d. (`noise_std`), heavy-tail outliers
 (`outlier_frac` × `outlier_scale`), missing observations (`missing_frac`,
 encoded as NaN and masked in fitting), constant per-axis bias (`bias`).
-Colored (AR(1)) and heteroscedastic track noise are on the roadmap.
+**Iteration 2 adds the structured processes real GS/mocap tracks have**,
+configured per condition through `noise_kwargs`:
+
+| key | process |
+|---|---|
+| `ar1_rho` | temporally correlated AR(1) track noise (replaces the i.i.d. draw) |
+| `hetero` | observation std scales with ground-truth speed |
+| `speed_outlier` | outlier probability proportional to speed |
+| `missing_bursts` / `burst_width` | contiguous missing intervals, not i.i.d. gaps |
+| `jitter` | timestamp jitter (smooth random shift of the queried time) |
+| `quantize` | amplitude quantization |
+| `axis_corr` | equicorrelated per-axis noise |
+| `bias_drift` | smooth low-frequency bias per axis |
+
+When every key is absent the model is bit-identical to the original i.i.d.
+one. The oracle builds deterministic continuous noise fields over `[0, 1]`, so
+adaptive samplers and repeated queries see a consistent realization.
+
+Iteration 2 also adds **extrapolation protocols** (`split`): `early`, `late`,
+`middle` and `interp` restrict sampling to a train window (or union of
+windows) and evaluate on a disjoint hold-out window.
 
 ### 3.7 Metrics
 
@@ -158,6 +186,18 @@ Colored (AR(1)) and heteroscedastic track noise are on the roadmap.
 `train_rmse`, `fit_time_s`, `eval_time_s`, `n_params*`,
 plus aggregation metrics `aulc` (area under the error-vs-log-budget curve) and
 `pareto_front`.
+
+**Iteration 2 adds conditioning telemetry and timing/window metrics.**
+
+- Per-fit telemetry: `design_cond`, `design_rank`, `n_coeff`, `eff_dof`,
+  `eff_dof_ratio`, `penalty_rank`, `penalty_nullity` (linear bases);
+  `gp_kernel_cond`, `gp_lengthscale`, `gp_signal_var`, `gp_noise_var`,
+  `gp_n_support`, `gp_nll` (GPs); `mlp_param_norm`, `mlp_grad_norm` (MLP);
+  `dmp_weight_norm`; `resid_acf1`; and `knot_{min,median,max}_gap`,
+  `knot_near_dupes`, `knot_endpoint_span`, `n_selected_sites`.
+- `holdout_*` / `trainwin_*` metrics on the extrapolation windows.
+- `phase_err` (cross-correlation lag) and `dtw` (dynamic time warping),
+  because position RMSE hides timing errors.
 
 ## 4. Synthetic snappy motions
 
@@ -204,6 +244,12 @@ python -m splinebench.run --suite robustness --out results/robustness.jsonl
 python -m splinebench.run --report results/starter.jsonl \
     --summary results/starter_summary.csv --plots results/starter
 
+# Iteration 2 stress grids (structured noise, time parameterization,
+# extrapolation, adversarial knots, auto-tuned knot/penalty counts)
+python scripts/run_iteration2.py                 # full: 4 455 conditions, 5 seeds
+python scripts/run_iteration2.py --quick         # 3 seeds
+python -m splinebench.run --suite i2_noise --out results/iteration2/i2_noise.jsonl
+
 # print the registry / backlog
 python -m splinebench.run --list
 ```
@@ -224,6 +270,13 @@ seed/motion/budget grid.
 | sampling | 240 | 10 920 |
 | robustness | 120 | 12 600 |
 | full (union) | — | 56 700 |
+| i2_core | 540 | 900 |
+| i2_noise | 810 | 1 350 |
+| i2_timeparam | 540 | 900 |
+| i2_extrap | 540 | 900 |
+| i2_adversarial | 99 | 165 |
+| i2_knotcount | 144 | 240 |
+| iteration2 (union) | 2 673 | 4 455 |
 
 (Counts are generated by `suites.py`; run
 `python -c "from splinebench import suites; print(len(suites.build('starter', quick=True)))"`.)
@@ -649,7 +702,273 @@ Ranked, each as a concrete suite/condition change:
    the companion study attributes SplineGS's H1 failure to the rotation
    parameterization rather than to splines per se.
 
-## 8. Hypotheses and practical tips
+## 8. Iteration 2 — stress-testing the Iteration 1 winners
+
+> **Why.** Section 7's conclusions — GP-Matérn is the most sample-efficient
+> and noise-robust representation, adaptive knots beat uniform, penalized
+> cubic B-splines close the gap, Sobol beats active sampling — were obtained
+> under i.i.d. Gaussian noise, translation-only, fixed-duration, fixed
+> time-range synthetic motions at 3 seeds. Iteration 2 freezes every
+> registry and re-runs the winners under the assumptions that could have
+> manufactured those conclusions: structured track noise, non-linear time
+> parameterization, extrapolation, adversarial knot layouts and auto-tuned
+> knot/penalty counts. It also instruments **every fit** with numerical
+> conditioning telemetry and reports **paired bootstrap** confidence
+> intervals instead of 3-seed means.
+
+All Iteration 2 records live in `results/iteration2/*.jsonl` (kept separate
+from the Iteration 1 files so §6 is unchanged). Runner:
+
+```bash
+python scripts/run_iteration2.py        # 4 455 conditions, 5 seeds, ~2 min
+python -m splinebench.report --results results \
+    --i2-dir results/iteration2 --readme README.md
+```
+
+### 8.1 Conditioning telemetry — failures are conditioning failures
+
+Every fit now records the design-matrix condition number and rank, the
+effective degrees of freedom, the penalty rank/null space, the GP kernel
+condition number, residual autocorrelation and knot-spacing statistics.
+
+<!-- AUTO:I2.1 START -->
+| representation | % rank-def | median `design_cond` | median `eff_dof` | median `eff_dof_ratio` | median `gp_kernel_cond` | median `resid_acf1` |
+|---|---|---|---|---|---|---|
+| bspline3 | 67 | 10.8 | 7 | 0.35 | — | -0.302 |
+| catmull_rom | 0 | 3.67 | 7 | 0.32 | — | -0.22 |
+| gp_matern52 | — | — | — | — | 1.8e+03 | -0.538 |
+| gp_rbf | — | — | — | — | 940 | -0.507 |
+| hermite | 0 | 2.89 | 7 | 0.32 | — | -0.213 |
+| pspline | 67 | 10.8 | 6.81 | 0.34 | — | -0.283 |
+
+`i2_core`, iid noise, budgets 10–50; `design_cond` infinite/NaN counts as rank-deficient; medians over all motions/seeds.
+<!-- AUTO:I2.1 END -->
+
+The headline is **67% of unpenalized `split_merge` cubic fits are
+rank-deficient**: the placer puts sites at the observed data extremes, which
+leaves the first/last B-spline basis function with no support at any
+observation, so the design loses rank and `cond = ∞`. The penalty does not
+remove the duplicate knots, but it regularizes the null directions
+(`penalty_rank = 8`, `penalty_nullity = 2` for a cubic P-spline), which is why
+`pspline` has the same 67% rank deficiency yet does not blow up. GP's kernel
+matrix is well conditioned (median `1.8e3` at `N ≤ 50`), and its **negative
+residual autocorrelation (`resid_acf1 ≈ -0.54`)** is a direct signature of
+noise interpolation — the flip side of its robustness. This supports the
+Iteration 2 hypothesis that many "representation failures" are really
+conditioning failures.
+
+### 8.2 Realistic track noise — GP's noise robustness survives; RANSAC's does not
+
+Nine observation processes are compared at the same nominal `σ = 0.01`:
+i.i.d., AR(1) at ρ=0.90/0.98, speed-scaled heteroscedasticity, speed-weighted
+outliers, missing bursts, quantization, per-axis correlation and bias drift.
+
+<!-- AUTO:I2.2 START -->
+| method | iid | ar1_0.90 | ar1_0.98 | hetero_speed | speed_outliers | missing_bursts | quantized | axis_corr | bias_drift |
+|---|---|---|---|---|---|---|---|---|---|
+| gp_matern52 + uniform + least_squares | **0.214** | **0.212** | **0.212** | **0.22** | **0.215** | **0.232** | **0.215** | **0.215** | **0.223** |
+| pspline + split_merge + least_squares + diff(0.001) | 0.464 | 0.469 | 0.47 | 0.494 | 0.501 | 0.561 | 0.474 | 0.471 | 0.477 |
+| hermite + feature_peaks + huber | 0.346 | 0.349 | 0.349 | 0.344 | 0.35 | 0.44 | 0.346 | 0.348 | 0.353 |
+| catmull_rom + uniform + least_squares | 1.19 | 1.19 | 1.19 | 1.22 | 1.2 | 2.41 | 1.19 | 1.19 | 1.25 |
+| bspline3 + split_merge + ransac | 1.09 | 0.909 | 0.91 | 0.968 | 0.936 | 3.38 | 0.905 | 473 | 1.66 |
+
+`i2_noise`: mean hold-out `pos_rmse` (lower is better), over {staccato, bounce, wobble} × budgets {20, 50} × 5 seeds; best *absolute* error per column in bold. Compare each cell with its own `iid` column to read off the degradation ratio (e.g. RANSAC is >400× worse under per-axis correlation and 3× worse under missing bursts).
+<!-- AUTO:I2.2 END -->
+
+GP-Matérn stays within **8% of its i.i.d. error on every structured noise
+process**, reproducing the Iteration 1 robustness ranking. The spline rows
+degrade most under **missing bursts** (Catmull-Rom 2.4× its i.i.d. error,
+P-spline 1.2×) — i.i.d. missing points are easy because they leave the local
+density nearly uniform, whereas a burst removes a whole time neighbourhood.
+RANSAC is the cautionary result: it is **>400× worse under per-axis
+correlation** and **3× worse under missing bursts**, and it is the only
+method that *improves* (relatively) as noise gets structured — because it has
+already collapsed to a smooth majority curve. Temporally correlated noise
+does **not** break GP, so Iteration 1's "GP is noise-robust" conclusion is
+not an artifact of i.i.d. noise; the robust-loss conclusion is.
+
+### 8.3 Time parameterization — warping helps, but *oracle* timing can be worse
+
+The time-parameterization axis was untested in Iteration 1. The spline is fit
+in the warped domain `u(t)` and metrics compose derivatives through `u` by
+the chain rule; `oracle` mode builds `u(t)` from ground-truth derivatives.
+
+<!-- AUTO:I2.3 START -->
+| representation | time param | realistic `pos_rmse` | oracle `pos_rmse` | realistic `peak_time_err` | oracle `peak_time_err` |
+|---|---|---|---|---|---|
+| gp_matern52 | linear | 0.226 | 0.226 | 0.22 | 0.22 |
+| gp_matern52 | chord | 0.273 | 0.274 | 0.182 | 0.156 |
+| gp_matern52 | centripetal | 0.29 | 0.273 | 0.243 | 0.206 |
+| gp_matern52 | accel | 0.27 | 0.284 | 0.179 | 0.196 |
+| gp_matern52 | jerk | 0.278 | 0.292 | 0.192 | 0.209 |
+| pspline | linear | 0.464 | 0.464 | 0.452 | 0.452 |
+| pspline | chord | 0.316 | 0.321 | 0.258 | 0.261 |
+| pspline | centripetal | 0.319 | 0.319 | 0.267 | 0.277 |
+| pspline | accel | 0.307 | 0.327 | 0.271 | 0.282 |
+| pspline | jerk | 0.32 | 0.33 | 0.255 | 0.282 |
+| bspline3 | linear | 0.404 | 0.404 | 0.334 | 0.334 |
+| bspline3 | chord | 0.323 | 8.23e+05 | 0.215 | 0.191 |
+| bspline3 | centripetal | 0.327 | 8.47e+04 | 0.267 | 0.247 |
+| bspline3 | accel | 0.343 | 7.86e+04 | 0.238 | 0.252 |
+| bspline3 | jerk | 0.469 | 2.33e+05 | 0.261 | 0.219 |
+
+`i2_timeparam`: mean over {staccato, double_step, wobble} × budgets {20, 50} × 5 seeds; the spline is fit in the warped `u(t)` and metrics compose derivatives through it.
+<!-- AUTO:I2.3 END -->
+
+Warped time helps the splines substantially: `pspline` improves from 0.464
+(linear) to ~0.31–0.32 (chord/centripetal/accel/jerk) and `bspline3` from
+0.404 to ~0.32. But **oracle timing is not automatically better**: on
+`double_step` the ground-truth arc-length map has a dwell where `u(t)` is
+nearly flat, several observations collapse onto the same `u`, `split_merge`
+inserts near-duplicate knots, and the unpenalized `bspline3` reaches
+`pos_rmse` of 10⁶–10⁷ (`design_cond` up to 10⁶⁷). The noisy, Savitzky–Golay
+smoothed realistic timing law avoids the exact dwell and stays stable. This
+sharpens the SplineGS H2 hypothesis: the failure is an **interaction between
+the timing law, duplicate knots and conditioning**, not the spline basis per
+se — and a difference penalty (or a knot-spacing floor) is the fix, as the
+`pspline` oracle rows show (0.32, not 10⁶). GP is unaffected because it has no
+knots (0.22–0.29 across all time laws).
+
+### 8.4 Extrapolation — GP generalizes outside the training window, splines do not
+
+Training is restricted to `early` (0–0.5), `late` (0.5–1) and `middle`
+(0.3–0.7) windows, or to a disjoint union (0–0.45 ∪ 0.55–1) with a held-out
+middle interval (`interp`). Hold-out error is measured on the unseen window.
+
+<!-- AUTO:I2.4 START -->
+| representation | none | early | late | middle | interp | holdout/trainwin (mean) |
+|---|---|---|---|---|---|---|
+| gp_matern52 | 0.169 | 0.306 | 0.308 | 0.314 | 0.248 | 2.87 |
+| gp_rbf | 0.166 | 0.305 | 0.306 | 0.299 | 0.246 | 3.08 |
+| pspline | 0.363 | 4.16 | 3.71 | 4.54 | 0.317 | 14 |
+| bspline3 | 0.393 | 41 | 42.6 | 31 | 0.325 | 88.4 |
+| catmull_rom | 1.05 | 9.97 | 8.6 | 6.46e+03 | 0.452 | 44 |
+| hermite | 0.249 | 3.23 | 2.5 | 3.03 | 0.273 | 12.7 |
+
+`i2_extrap`: hold-out `pos_rmse`; `early`/`late`/`middle` extrapolate beyond the training window, `interp` holds out a disjoint middle interval (train on 0–0.45 ∪ 0.55–1). Mean over {staccato, bounce, chirp} × budgets {20, 50} × 5 seeds, linear time.
+<!-- AUTO:I2.4 END -->
+
+GP-Matérn and GP-RBF keep hold-out error near their interpolation error
+(~0.3 versus 0.17), while adaptive-knot splines degrade by 10–100×
+(`pspline` 4.2, `bspline3` 41, Hermite 3.2, Catmull-Rom 10–6.5×10³). The
+kernel prior is a genuine extrapolation advantage, and the Iteration 2
+hypothesis that regularized adaptive-knot splines extrapolate better is
+**falsified** with these placers — they anchor their last knot at the edge of
+the observed window and then extrapolate a polynomial. Interpolation hold-out
+(`interp`) is benign for every method (< 0.5). If extrapolation matters for
+deployment, it needs an explicit prior or an edge-aware knot policy, not just
+adaptive placement.
+
+### 8.5 Adversarial knot conditioning — the penalty fixes identifiability, not jerk
+
+To separate basis expressiveness from numerical conditioning, knots are
+deliberately clustered, spaced just above the duplicate guard, piled at one
+end, or given a single huge gap.
+
+<!-- AUTO:I2.5 START -->
+| representation | reg | mode | selected sites | median `design_cond` | `pos_rmse` | `jerk_rmse` |
+|---|---|---|---|---|---|---|
+| bspline3 | diff | cluster | 16 | inf | 0.356 | 2.47e+07 |
+| bspline3 | none | cluster | 16 | inf | 0.437 | 3.09e+08 |
+| bspline3 | none | default | 16 | inf | 0.75 | 3e+05 |
+| bspline3 | none | near_duplicate | 16 | inf | 0.323 | 5.58e+09 |
+| bspline3 | none | one_gap | 16 | inf | 0.31 | 1.95e+06 |
+| bspline5 | diff | cluster | 16 | inf | 0.331 | 1.03e+07 |
+| bspline5 | none | cluster | 16 | inf | 13.5 | 1.33e+10 |
+| bspline7 | diff | cluster | 16 | inf | 0.331 | 9.55e+06 |
+| bspline7 | none | cluster | 16 | inf | 7.99e+03 | 5.72e+12 |
+| hermite | none | cluster | 16 | inf | 0.519 | 1.85e+09 |
+| pspline | diff | cluster | 16 | inf | 0.356 | 2.47e+07 |
+
+`i2_adversarial`, budget 50, mean over {staccato, bounce, wobble} × 5 seeds; `uniform` is the reference row. `near_duplicate` sites are 1.1e-4 apart, below any useful resolution.
+<!-- AUTO:I2.5 END -->
+
+Clustered and near-duplicate layouts make the design rank-deficient
+(`cond = ∞`) for every degree. Unpenalized degree-5/7 B-splines then explode
+(`bspline5` 13.5, `bspline7` 8.0×10³ position RMSE; jerk 10¹⁰–10¹²). Adding a
+second-difference penalty pulls *position* back to ~0.33 — comparable to the
+uniform layout — but leaves **jerk at 10⁷**, two-to-five orders above the
+well-spaced case. So regularization restores coefficient identifiability but
+does not by itself make clustered knots safe for derivative metrics; a
+knot-spacing floor or a derivative penalty is still required. This is the
+quantitative version of Iteration 1's "high degree without penalty is a trap."
+
+### 8.6 Knot-count and penalty auto-tuning — naive GCV under-smooths and loses
+
+`n_sites = budget/3` is arbitrary. The `cv` placer selects the *number* of
+knots by K-fold cross-validation on the observation track, and `pspline_gcv`
+replaces the hand-set `lam` with a GCV scan.
+
+<!-- AUTO:I2.6 START -->
+| method | knots | reg | mean sites | B20 `pos_rmse` | B50 `pos_rmse` | `jerk_rmse` |
+|---|---|---|---|---|---|---|
+| bspline3 | cv | — | 4.05 | 0.381 | 0.3 | 5.44e+05 |
+| bspline3 | split_merge | diff | 11.5 | 0.358 | 0.401 | 5.03e+06 |
+| bspline3 | split_merge | — | 11.5 | 0.309 | 0.509 | 1.83e+06 |
+| pspline | cv | — | 4.7 | 0.383 | 0.295 | 1.67e+06 |
+| pspline | split_merge | — | 11.5 | 0.376 | 0.655 | 5.32e+06 |
+| pspline_gcv | split_merge | — | 11.5 | 0.297 | 0.732 | 2.31e+06 |
+
+`i2_knotcount`, mean over {staccato, double_step, bounce, wobble} × 5 seeds; `n_sites` is the budget/3 default upper bound, `mean sites` is what the placer actually used.
+<!-- AUTO:I2.6 END -->
+
+CV picks **4–5 sites at B50** instead of the default 16 and improves the
+unpenalized cubic from 0.509 to 0.300 position RMSE (`pspline` from 0.655 to
+0.295) while cutting jerk by ~3×. But the paired bootstrap (§8.7) puts the
+55% B50 gap's 95% CI at `[-0.564, 0.025]` (`p = 0.16`): **with 5 seeds and 4
+motions the win is not significant**. GCV is the surprise: as the knot count
+grows its median `lam` falls (3.5 at B20 → 2.0 at B50) while `eff_dof` rises
+(4.6 → 12.8), so it is *worse* than the hand-set `lam = 1e-3` at B50 (0.732
+versus 0.655 for the same knots). Tuning is not automatically better than a
+sensible default; knot count matters more than penalty strength, which is the
+opposite of the Iteration 1 follow-up guess.
+
+### 8.7 Paired statistics — the big claims hold, the small ones do not
+
+Every Iteration 2 condition is run at 5 seeds, and comparisons are paired by
+`(motion, budget, seed)` with a 5 000-resample bootstrap CI.
+
+<!-- AUTO:I2.7 START -->
+| suite | paired comparison | metric | mean Δ [95% CI] | p | n |
+|---|---|---|---|---|---|
+| `i2_core` | GP-Matérn − pspline (B20) | `pos_rmse` | -0.164 [-0.218, -0.113] | 0 | 50 |
+| `i2_core` | GP-Matérn − pspline (B50) | `pos_rmse` | -0.168 [-0.263, -0.0907] | 0 | 50 |
+| `i2_core` | GP-Matérn − Catmull-Rom | `pos_rmse` | -0.434 [-0.838, -0.133] | 0 | 150 |
+| `i2_adversarial` | clustered: diff − none | `pos_rmse` | -1.33e+03 [-3.61e+03, -87.2] | 0 | 15 |
+| `i2_knotcount` | bspline3: CV − fixed knots (B20) | `pos_rmse` | 0.0721 [-0.0227, 0.243] | 0.637 | 20 |
+| `i2_knotcount` | bspline3: CV − fixed knots (B50) | `pos_rmse` | -0.208 [-0.564, 0.0251] | 0.162 | 20 |
+
+Paired bootstrap (5000 resamples) over matched (motion, budget, seed) cells; Δ = first − second, negative favours the first method. p is the two-sided bootstrap sign p-value.
+<!-- AUTO:I2.7 END -->
+
+GP-Matérn's lead over `pspline` (−0.164 at B20, −0.168 at B50) and over
+Catmull-Rom (−0.434) are significant with CIs excluding zero. The
+adversarial-penalty rescue is significant but its CI spans three orders of
+magnitude (`[−3.6×10³, −87]`) because it is dominated by the `bspline7`
+blow-up. The CV knot-count improvement at B50 is **not** significant. The
+Iteration 1 caution therefore stands: 3–18% gaps at 3 seeds should not be
+trusted; the Iteration 2 grids give the effect sizes and intervals needed to
+tell which conclusions are real.
+
+### 8.8 Iteration 2 verdicts on the Iteration 1 menu
+
+| Iteration 1 claim | Iteration 2 stress | Verdict |
+|---|---|---|
+| GP-Matérn leads sample efficiency | structured noise, time warps, extrapolation, 5 seeds | **survives** — best or near-best in every suite, significant in paired tests |
+| GP is the most noise-robust | AR(1), hetero, speed outliers, bursts, axis corr, drift | **survives** — within 8% of i.i.d.; robust losses do not close the gap |
+| Adaptive knots beat uniform | clustered/near-duplicate/one-gap layouts | **partial** — they beat uniform when well-spaced, but rank-deficiency is pervasive (67%) and duplicated knots are dangerous |
+| Penalized cubic closes the gap at low N | adversarial knots, GCV tuning, extrapolation | **partial** — penalty rescues position but not jerk, and hurts extrapolation; hand-set `lam=1e-3` beats GCV |
+| Active sampling loses to Sobol under i.i.d. | not re-run (sampling unchanged) | **open** — structured noise sampling is the main remaining gap |
+| Problem is representation, not conditioning | design-`cond`/rank/DoF telemetry | **falsified** — conditioning explains a large share of the failures |
+| Timing law was untested | linear/chord/centripetal/accel/jerk × oracle/realistic | **new** — warping helps splines, but *oracle* timing can be catastrophic via duplicate knots |
+
+**Not covered by Iteration 2** (carried into §9): rotation/`SO(3)` and
+`SE(3)` representations, per-Gaussian deployment/storage projection,
+online/streaming fits, physical/constraint feasibility, and cost-aware or
+active sampling under the new structured noise models. MLP/`bspline_mlp` were
+excluded from the main I2 grids to keep them GPU-free and fast.
+
+## 9. Hypotheses and practical tips
 
 Hypotheses this harness is designed to falsify (result verdicts in §7.4):
 
@@ -684,27 +1003,31 @@ Practical guidance carried over from the SplineGS-empirical study:
 - compare at 5–20 samples, not only at the final budget — that is where
   sample efficiency lives.
 
-## 9. Repo layout
+## 10. Repo layout
 
 ```
 splinebench/
   motions.py         synthetic GT motions, analytic derivatives to snap
   representations.py bases + fitters registry and derivative math
   fitters.py         linear/robust/nonlinear/global optimizers, BO
-  knots.py           knot/control-site placement strategies
+  knots.py           knot/control-site placement strategies (incl. cv, clustered)
   samplers.py        observation-time sampling strategies (incl. active)
   timeparam.py       monotone t -> u time parameterizations
-  metrics.py         trajectory metrics, aggregation, AULC, Pareto
-  experiment.py      Condition tuple, noise oracle, runner, JSONL I/O
-  suites.py          smoke / starter / placement / fitters / sampling /
-                     robustness / full condition generators
+  metrics.py         trajectory metrics, conditioning, AULC, DTW, Pareto
+  experiment.py      Condition tuple, noise oracle (i.i.d. + structured), runner
+  suites.py          smoke / starter / ... / full + i2_* condition generators
   catalog.py         machine-readable status + citation for every method
   plots.py           sample-efficiency, Pareto, robustness plots
+  report.py          README/ANALYSIS table generation (6.x and I2.x)
   run.py             CLI
+scripts/
+  run_extra.py       fill Iteration 1 table gaps
+  run_iteration2.py  Iteration 2 stress grids -> results/iteration2/
 tests/               unit + conformance tests for every implemented axis
 references.bib       bibliography (keys used by catalog.py and this README)
 thirdparty/          local paper PDFs (git-ignored)
-results/             JSONL runs, ANALYSIS.md and plots (git-ignored)
+results/             Iteration 1 JSONL runs, ANALYSIS.md and plots (git-ignored)
+results/iteration2/  Iteration 2 JSONL runs (git-ignored)
 ```
 
 ## Appendix A — Full method menu (implemented `[x]` / backlog `[ ]`)
@@ -713,7 +1036,7 @@ results/             JSONL runs, ANALYSIS.md and plots (git-ignored)
 
 Classical piecewise polynomial
 `[x]` piecewise linear, cubic Hermite, Catmull-Rom, B-spline deg 2/3/5/7,
-P-spline, NURBS, Akima, PCHIP ·
+P-spline, GCV P-spline (`pspline_gcv`), NURBS, Akima, PCHIP ·
 `[ ]` quadratic, quintic, septic, quintic Hermite, Bézier (quadratic, cubic,
 higher-order, rational, composite), uniform/non-uniform/clamped/open/periodic/
 quasi-uniform B-splines, T-splines [`sederberg2003`], LR B-splines
@@ -755,7 +1078,8 @@ contact/event-based hybrid splines, spline + MPC tracking layer.
 
 `[x]` uniform, quantile, chord-length, centripetal, curvature-adaptive,
 feature-based (derivative extrema), acceleration reversals, RDP
-[`ramer1972`], split-and-merge, recursive bisection, greedy forward selection,
+[`ramer1972`], split-and-merge, recursive bisection, CV knot-count selection
+(`cv`), adversarial clustered layouts (`clustered`), greedy forward selection,
 orthogonal-matching-pursuit-style greedy [`tropp2007`], k-means clustering,
 farthest-point [`elden1997`], Bayesian optimization [`snoek2012`],
 residual-based adaptive refinement, active learning (uncertainty) [`cohn1996`].
@@ -845,10 +1169,17 @@ entries: [`park2024splinegs`] (the failing baseline), [`deboor1978`],
   [`kim1995`], dual quaternions [`kavan2007`]) slot straight into the
   representation registry and re-use the same metrics after a geodesic
   variant is added.
-- The "GS realism" gap is the observation model, not the math: GS tracks are
-  noisy, occasionally missing, and spatially correlated. v1 covers i.i.d.
-  noise, outliers, missing and bias; AR(1)/heteroscedastic track noise and
-  per-Gaussian multi-query budgets are the next additions.
+- Iteration 2 closes the observation-model gap: AR(1), heteroscedastic,
+  speed-proportional outliers, missing bursts, timestamp jitter,
+  quantization, per-axis correlation and bias drift are implemented (§3.6),
+  and the winners were re-tested under them (§8.2). Per-Gaussian
+  multi-query budgets, deployment/storage projection and `SO(3)`/`SE(3)`
+  remain the next additions.
+- Conditioning is now first-class: every record carries design-matrix and
+  kernel condition numbers, effective DoF and knot-spacing statistics, and
+  §8.1 shows a large share of "representation failures" are rank/conditioning
+  failures. Any new method should report `design_cond`, `eff_dof` and
+  `knot_near_dupes` before claiming a representation win.
 - `full`-suite counts are large (~56.7k conditions) because every tuple is
   stored; use `--limit`/`--suite placement` and resume from JSONL.
 - All derivatives used by metrics are analytic (chain rule through the

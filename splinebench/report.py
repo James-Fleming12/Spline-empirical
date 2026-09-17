@@ -10,6 +10,7 @@ suites later refreshes the numbers without hand-editing.
 
 import argparse
 import glob
+import json
 import os
 
 import numpy as np
@@ -292,6 +293,274 @@ def table_sampling(df):
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Iteration 2 tables
+# ---------------------------------------------------------------------------
+
+def _json_dict(value):
+    if isinstance(value, dict):
+        return value
+    if not value or (isinstance(value, float) and not np.isfinite(value)):
+        return {}
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+
+
+def _noise_label(value):
+    d = _json_dict(value)
+    key = json.dumps(d, sort_keys=True)
+    for name, kw in suites.I2_NOISE_MODELS:
+        if json.dumps(kw, sort_keys=True) == key:
+            return name
+    return "other"
+
+
+def _mode_label(value):
+    d = _json_dict(value)
+    return d.get("mode", "default")
+
+
+def _method_label(rep, knot, fitter, reg_kind, reg_lam):
+    label = f"{rep} + {knot} + {fitter}"
+    if reg_kind and reg_kind != "none":
+        label += f" + {reg_kind}({_fmt(reg_lam, 2)})"
+    return label
+
+
+def paired_bootstrap(a, b, n_boot=5000, seed=0):
+    """Paired bootstrap CI and sign p-value for mean(a - b)."""
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    d = a - b
+    d = d[np.isfinite(d)]
+    if len(d) == 0:
+        return (np.nan, np.nan, np.nan, np.nan, 0)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, len(d), size=(int(n_boot), len(d)))
+    boot = d[idx].mean(axis=1)
+    lo, hi = np.percentile(boot, [2.5, 97.5])
+    p = 2.0 * min(float((boot <= 0).mean()), float((boot >= 0).mean()))
+    return (float(d.mean()), float(lo), float(hi), float(min(p, 1.0)), int(len(d)))
+
+
+def _paired_series(df, mask_a, mask_b, metric, keys=("motion", "budget", "seed")):
+    a = df[mask_a].groupby(list(keys))[metric].mean()
+    b = df[mask_b].groupby(list(keys))[metric].mean()
+    joined = pd.concat([a.rename("a"), b.rename("b")], axis=1).dropna()
+    return joined["a"].values, joined["b"].values
+
+
+def table_i2_conditioning(df):
+    data = df.copy()
+    if "noise_kwargs" in data.columns:
+        data["_noise"] = data["noise_kwargs"].apply(_noise_label)
+        data = data[data["_noise"] == "iid"]
+    has_rank = "design_rank" in data.columns
+    rows = []
+    for rep, g in data.groupby("representation"):
+        linear = g[g["design_rank"].notna()] if has_rank else g.iloc[0:0]
+        if len(linear):
+            finite = np.isfinite(linear["design_cond"])
+            pct = f"{100 * float((~finite).mean()):.0f}"
+            med_cond = _fmt(linear.loc[finite, "design_cond"].median()) if finite.any() else "inf"
+        else:
+            pct, med_cond = "—", "—"
+        rows.append(
+            [
+                rep,
+                pct,
+                med_cond,
+                _fmt(g["eff_dof"].median() if "eff_dof" in g else np.nan),
+                _fmt(g["eff_dof_ratio"].median() if "eff_dof_ratio" in g else np.nan),
+                _fmt(g["gp_kernel_cond"].median() if "gp_kernel_cond" in g else np.nan),
+                _fmt(g["resid_acf1"].median() if "resid_acf1" in g else np.nan),
+            ]
+        )
+    header = ["representation", "% rank-def", "median `design_cond`", "median `eff_dof`",
+              "median `eff_dof_ratio`", "median `gp_kernel_cond`", "median `resid_acf1`"]
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join(["---"] * len(header)) + "|"]
+    lines += ["| " + " | ".join(str(c) for c in row) + " |" for row in rows]
+    lines.append("")
+    lines.append("`i2_core`, iid noise, budgets 10–50; `design_cond` infinite/NaN counts as rank-deficient; "
+                 "medians over all motions/seeds.")
+    return "\n".join(lines)
+
+
+def table_i2_noise(df):
+    header = ["method"] + [name for name, _ in suites.I2_NOISE_MODELS]
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join(["---"] * len(header)) + "|"]
+    rows = []
+    for rep, knot, fitter, reg_kind, reg_lam in suites.I2_NOISE_METHODS:
+        label = _method_label(rep, knot, fitter, reg_kind, reg_lam)
+        mask = (
+            (df["representation"] == rep) & (df["knots"] == knot)
+            & (df["fitter"] == fitter) & (df["reg_kind"] == reg_kind)
+            & (df["reg_lam"] == reg_lam)
+        )
+        g = df[mask]
+        if g.empty:
+            continue
+        row = [label]
+        for name, _ in suites.I2_NOISE_MODELS:
+            sub = g[g["noise_kwargs"].apply(_noise_label) == name]["pos_rmse"]
+            row.append(_fmt(sub.mean(), 3) if len(sub) else "—")
+        rows.append(row)
+    for col in range(1, len(header)):
+        vals = []
+        for row in rows:
+            try:
+                vals.append(float(row[col]))
+            except ValueError:
+                vals.append(np.inf)
+        best = min(vals)
+        for row in rows:
+            try:
+                if float(row[col]) == best:
+                    row[col] = f"**{row[col]}**"
+            except ValueError:
+                pass
+    lines += ["| " + " | ".join(str(c) for c in row) + " |" for row in rows]
+    lines.append("")
+    lines.append("`i2_noise`: mean hold-out `pos_rmse` (lower is better), over {staccato, bounce, wobble} × "
+                 "budgets {20, 50} × 5 seeds; best *absolute* error per column in bold. Compare each cell with "
+                 "its own `iid` column to read off the degradation ratio (e.g. RANSAC is >400× worse under "
+                 "per-axis correlation and 3× worse under missing bursts).")
+    return "\n".join(lines)
+
+
+def table_i2_timeparam(df):
+    reps = ["gp_matern52", "pspline", "bspline3"]
+    tps = ["linear", "chord", "centripetal", "accel", "jerk"]
+    header = ["representation", "time param", "realistic `pos_rmse`", "oracle `pos_rmse`",
+              "realistic `peak_time_err`", "oracle `peak_time_err`"]
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join(["---"] * len(header)) + "|"]
+    for rep in reps:
+        for tp in tps:
+            g = df[(df["representation"] == rep) & (df["time_param"] == tp)]
+            if g.empty:
+                continue
+            real = g[~g["time_param_oracle"]]
+            orac = g[g["time_param_oracle"]]
+            lines.append(
+                "| " + " | ".join(
+                    [rep, tp, _fmt(real["pos_rmse"].mean()), _fmt(orac["pos_rmse"].mean()),
+                     _fmt(real["peak_time_err"].mean()), _fmt(orac["peak_time_err"].mean())]
+                ) + " |"
+            )
+    lines.append("")
+    lines.append("`i2_timeparam`: mean over {staccato, double_step, wobble} × budgets {20, 50} × 5 seeds; "
+                 "the spline is fit in the warped `u(t)` and metrics compose derivatives through it.")
+    return "\n".join(lines)
+
+
+def table_i2_extrap(df):
+    reps = ["gp_matern52", "gp_rbf", "pspline", "bspline3", "catmull_rom", "hermite"]
+    splits = ["none", "early", "late", "middle", "interp"]
+    header = ["representation"] + splits + ["holdout/trainwin (mean)"]
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join(["---"] * len(header)) + "|"]
+    for rep in reps:
+        row = [rep]
+        ratios = []
+        for split in splits:
+            g = df[(df["representation"] == rep) & (df["split"] == split)]
+            if g.empty:
+                row.append("—")
+                continue
+            metric = "holdout_pos_rmse" if split != "none" else "pos_rmse"
+            row.append(_fmt(g[metric].mean()))
+            if split != "none":
+                ratios.append(float(g["holdout_pos_rmse"].mean() / (g["trainwin_pos_rmse"].mean() + 1e-12)))
+        row.append(_fmt(float(np.mean(ratios))) if ratios else "—")
+        lines.append("| " + " | ".join(str(c) for c in row) + " |")
+    lines.append("")
+    lines.append("`i2_extrap`: hold-out `pos_rmse`; `early`/`late`/`middle` extrapolate beyond the training "
+                 "window, `interp` holds out a disjoint middle interval (train on 0–0.45 ∪ 0.55–1). "
+                 "Mean over {staccato, bounce, chirp} × budgets {20, 50} × 5 seeds, linear time.")
+    return "\n".join(lines)
+
+
+def table_i2_adversarial(df):
+    header = ["representation", "reg", "mode", "selected sites", "median `design_cond`",
+              "`pos_rmse`", "`jerk_rmse`"]
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join(["---"] * len(header)) + "|"]
+    for rep, g_rep in df.groupby("representation"):
+        for (reg_kind, mode), g in g_rep.groupby([g_rep["reg_kind"], g_rep["knot_kwargs"].apply(_mode_label)]):
+            cond = g["design_cond"].replace([np.inf, -np.inf], np.nan)
+            lines.append(
+                "| " + " | ".join(
+                    [rep, reg_kind, mode, _fmt(g["n_selected_sites"].mean()),
+                     "inf" if np.isinf(g["design_cond"]).any() else _fmt(cond.median()),
+                     _fmt(g["pos_rmse"].mean()), _fmt(g["jerk_rmse"].mean())]
+                ) + " |"
+            )
+    lines.append("")
+    lines.append("`i2_adversarial`, budget 50, mean over {staccato, bounce, wobble} × 5 seeds; `uniform` is the "
+                 "reference row. `near_duplicate` sites are 1.1e-4 apart, below any useful resolution.")
+    return "\n".join(lines)
+
+
+def table_i2_knotcount(df):
+    header = ["method", "knots", "reg", "mean sites", "B20 `pos_rmse`", "B50 `pos_rmse`", "`jerk_rmse`"]
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join(["---"] * len(header)) + "|"]
+    for (rep, knot, reg_kind, reg_lam), g in df.groupby(
+        ["representation", "knots", "reg_kind", "reg_lam"]
+    ):
+        lines.append(
+            "| " + " | ".join(
+                [rep, knot, reg_kind if reg_kind != "none" else "—", _fmt(g["n_selected_sites"].mean()),
+                 _fmt(g[g["budget"] == 20]["pos_rmse"].mean()), _fmt(g[g["budget"] == 50]["pos_rmse"].mean()),
+                 _fmt(g["jerk_rmse"].mean())]
+            ) + " |"
+        )
+    lines.append("")
+    lines.append("`i2_knotcount`, mean over {staccato, double_step, bounce, wobble} × 5 seeds; `n_sites` is the "
+                 "budget/3 default upper bound, `mean sites` is what the placer actually used.")
+    return "\n".join(lines)
+
+
+def table_i2_stats(core, adversarial, knotcount):
+    def cond(df, rep, knot, fitter, reg_kind, reg_lam, budget=None):
+        m = (
+            (df["representation"] == rep) & (df["knots"] == knot) & (df["fitter"] == fitter)
+            & (df["reg_kind"] == reg_kind) & (df["reg_lam"] == reg_lam)
+        )
+        if budget is not None:
+            m &= df["budget"] == budget
+        return m
+
+    comparisons = []
+    a = cond(core, "gp_matern52", "uniform", "least_squares", "none", 0.0)
+    b = cond(core, "pspline", "split_merge", "least_squares", "diff", 1e-3)
+    comparisons.append(("`i2_core`", "GP-Matérn − pspline (B20)", "pos_rmse", a & (core["budget"] == 20), b & (core["budget"] == 20), core))
+    comparisons.append(("`i2_core`", "GP-Matérn − pspline (B50)", "pos_rmse", a & (core["budget"] == 50), b & (core["budget"] == 50), core))
+    c = cond(core, "catmull_rom", "uniform", "least_squares", "none", 0.0)
+    comparisons.append(("`i2_core`", "GP-Matérn − Catmull-Rom", "pos_rmse", a, c, core))
+    adv_pen = (adversarial["knots"] == "clustered") & (adversarial["reg_kind"] == "diff")
+    adv_plain = (adversarial["knots"] == "clustered") & (adversarial["reg_kind"] == "none")
+    comparisons.append(("`i2_adversarial`", "clustered: diff − none", "pos_rmse", adv_pen, adv_plain, adversarial))
+    kc_cv = (knotcount["knots"] == "cv") & (knotcount["representation"] == "bspline3")
+    kc_fix = (knotcount["knots"] == "split_merge") & (knotcount["representation"] == "bspline3") & (knotcount["reg_kind"] == "none")
+    comparisons.append(("`i2_knotcount`", "bspline3: CV − fixed knots (B20)", "pos_rmse", kc_cv & (knotcount["budget"] == 20), kc_fix & (knotcount["budget"] == 20), knotcount))
+    comparisons.append(("`i2_knotcount`", "bspline3: CV − fixed knots (B50)", "pos_rmse", kc_cv & (knotcount["budget"] == 50), kc_fix & (knotcount["budget"] == 50), knotcount))
+
+    header = ["suite", "paired comparison", "metric", "mean Δ [95% CI]", "p", "n"]
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join(["---"] * len(header)) + "|"]
+    for suite, label, metric, mask_a, mask_b, df in comparisons:
+        va, vb = _paired_series(df, mask_a, mask_b, metric)
+        mean, lo, hi, p, n = paired_bootstrap(va, vb)
+        if not np.isfinite(mean):
+            lines.append(f"| {suite} | {label} | `{metric}` | — | — | 0 |")
+            continue
+        ci = f"{_fmt(mean)} [{_fmt(lo)}, {_fmt(hi)}]"
+        lines.append(f"| {suite} | {label} | `{metric}` | {ci} | {_fmt(p)} | {n} |")
+    lines.append("")
+    lines.append("Paired bootstrap (5000 resamples) over matched (motion, budget, seed) cells; "
+                 "Δ = first − second, negative favours the first method. p is the two-sided bootstrap sign p-value.")
+    return "\n".join(lines)
+
+
 def table_figures(df=None, results_dir="results"):
     figures = [
         ("starter_sample_efficiency.png", "`--plots results/starter`"),
@@ -426,6 +695,7 @@ def main(argv=None):
     parser.add_argument("--readme", default=None, help="patch AUTO blocks in this README")
     parser.add_argument("--facts", action="store_true", help="print decision-relevant comparisons")
     parser.add_argument("--plots", action="store_true", help="regenerate figures into results/")
+    parser.add_argument("--i2-dir", default="results/iteration2", help="directory with i2_*.jsonl")
     args = parser.parse_args(argv)
 
     df = load_results(args.results)
@@ -449,10 +719,31 @@ def main(argv=None):
         "6.5": table_sampling(df),
         "6.6": table_figures(df, args.results if os.path.isdir(args.results) else "results"),
     }
+
+    i2_blocks = {}
+    i2_dir = args.i2_dir
+    needed = ["i2_core", "i2_noise", "i2_timeparam", "i2_extrap", "i2_adversarial", "i2_knotcount"]
+    i2_paths = {name: os.path.join(i2_dir, f"{name}.jsonl") for name in needed}
+    if all(os.path.exists(p) for p in i2_paths.values()):
+        i2 = {name: load_results(p) for name, p in i2_paths.items()}
+        i2_blocks = {
+            "I2.1": table_i2_conditioning(i2["i2_core"]),
+            "I2.2": table_i2_noise(i2["i2_noise"]),
+            "I2.3": table_i2_timeparam(i2["i2_timeparam"]),
+            "I2.4": table_i2_extrap(i2["i2_extrap"]),
+            "I2.5": table_i2_adversarial(i2["i2_adversarial"]),
+            "I2.6": table_i2_knotcount(i2["i2_knotcount"]),
+            "I2.7": table_i2_stats(i2["i2_core"], i2["i2_adversarial"], i2["i2_knotcount"]),
+        }
+        print(f"loaded iteration-2 records: " + ", ".join(f"{n}={len(v)}" for n, v in i2.items()))
+    else:
+        print(f"iteration-2 results not found under {i2_dir}; skipping I2 tables")
+
+    all_blocks = {**blocks, **i2_blocks}
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as fh:
         fh.write("# Auto-generated analysis tables\n\n")
-        for name, body in blocks.items():
+        for name, body in all_blocks.items():
             fh.write(f"## {name}\n\n{body}\n\n")
     print(f"wrote {args.out}")
 
@@ -460,7 +751,7 @@ def main(argv=None):
         print(facts(df))
 
     if args.readme:
-        patch_readme(args.readme, blocks)
+        patch_readme(args.readme, all_blocks)
         print(f"patched {args.readme}")
     return 0
 

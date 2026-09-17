@@ -260,6 +260,108 @@ class SplitMergeKnots(KnotPlacer):
         return _dedupe_pad(chosen, n)
 
 
+class CVKnots(KnotPlacer):
+    """Choose the *number* of knots by K-fold cross-validation.
+
+    ``n_sites = budget / 3`` is an arbitrary default; this placer places between
+    ``min_sites`` and ``min(max_sites, ctx.n)`` split-merge knots and keeps the
+    count minimizing held-out position error under the actual representation
+    (via ``ctx.rep_factory`` when present, otherwise a cubic B-spline probe).
+    The returned site count can be smaller than ``ctx.n``.
+    """
+
+    name = "cv"
+    citation = "wahba1990"
+
+    def __init__(self, folds=5, max_sites=12, min_sites=3, degree=3):
+        self.folds = int(folds)
+        self.max_sites = int(max_sites)
+        self.min_sites = int(min_sites)
+        self.degree = int(degree)
+        self.selected_sites = None
+
+    def place(self, ctx):
+        from dataclasses import replace
+
+        from .representations import BSpline
+
+        n_obs = len(ctx.u)
+        k_max = int(min(self.max_sites, max(ctx.n, self.min_sites)))
+        k_min = int(min(self.min_sites, k_max))
+        if n_obs < max(4, k_min + 2) or k_max <= k_min:
+            return SplitMergeKnots().place(replace(ctx, n=max(ctx.n, 2)))
+        order = np.argsort(ctx.u)
+        u = ctx.u[order]
+        y = ctx.y[order]
+        fold_id = (np.arange(n_obs) * self.folds) // n_obs
+        best = (np.inf, None, None)
+        for k in range(k_min, k_max + 1):
+            pos = SplitMergeKnots().place(replace(ctx, n=k))
+            err, m = 0.0, 0
+            for f in range(self.folds):
+                te = fold_id == f
+                tr = ~te
+                if tr.sum() < k + 1 or te.sum() == 0:
+                    continue
+                try:
+                    if ctx.rep_factory is not None:
+                        rep = ctx.rep_factory(pos)
+                        rep.fit(u[tr], y[tr])
+                    else:
+                        rep = BSpline(pos, dim=y.shape[1], degree=self.degree)
+                        rep.fit(u[tr], y[tr])
+                    pred = rep.eval(u[te])
+                except Exception:
+                    continue
+                err += float(np.sum((pred - y[te]) ** 2))
+                m += int(te.sum())
+            if m == 0:
+                continue
+            cv = err / m
+            if cv < best[0]:
+                best = (cv, np.asarray(pos, dtype=float), k)
+        if best[1] is None:
+            return SplitMergeKnots().place(replace(ctx, n=max(ctx.n, 2)))
+        self.selected_sites = int(best[2])
+        return np.sort(best[1])
+
+
+class ClusteredKnots(KnotPlacer):
+    """Adversarial knot layouts that stress basis conditioning.
+
+    Modes:
+        cluster        -- most sites packed into a narrow interior interval;
+        one_gap        -- all but one site at the left end, one huge gap;
+        near_duplicate -- sites spaced just above the harness duplicate guard;
+        endpoint       -- sites piled at both domain ends.
+    """
+
+    name = "clustered"
+    citation = ""
+
+    def __init__(self, mode="cluster", center=0.5, width=0.02):
+        self.mode = str(mode)
+        self.center = float(center)
+        self.width = float(width)
+
+    def place(self, ctx):
+        n = max(ctx.n, 2)
+        if self.mode == "cluster":
+            if n <= 2:
+                return np.array([0.0, 1.0])
+            inner = np.linspace(self.center - 0.5 * self.width, self.center + 0.5 * self.width, n - 2)
+            return np.concatenate([[0.0], inner, [1.0]])
+        if self.mode == "one_gap":
+            inner = np.linspace(0.0, 0.05, max(n - 1, 1))
+            return np.concatenate([inner, [1.0]])
+        if self.mode == "near_duplicate":
+            inner = self.center + np.arange(max(n - 2, 1)) * 1.1e-4
+            return np.concatenate([[0.0], inner, [1.0]])
+        if self.mode == "endpoint":
+            return np.array([0.0, 1.0] + [1e-5] * max(n - 2, 0) + [1.0 - 1e-5] * max(n - 2, 0))[:n]
+        raise ValueError(f"unknown clustered mode '{self.mode}'")
+
+
 class GreedyKnots(KnotPlacer):
     name = "greedy"
     citation = "tropp2007"
@@ -421,6 +523,8 @@ KNOT_PLACERS = {
     "feature_peaks": FeaturePeakKnots,
     "rdp": RDPKnots,
     "split_merge": SplitMergeKnots,
+    "cv": CVKnots,
+    "clustered": ClusteredKnots,
     "greedy": GreedyKnots,
     "kmeans": KMeansKnots,
     "farthest_point": FarthestPointKnots,

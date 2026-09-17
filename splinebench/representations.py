@@ -29,6 +29,10 @@ class Representation:
     def eval(self, u):
         return self.eval_derivs(np.asarray(u, dtype=float).ravel(), order=0)[..., 0]
 
+    def diagnostics(self):
+        """Per-fit numerical-conditioning telemetry (returned as a dict)."""
+        return {}
+
     def _prepare(self, u, y, weight=None):
         u = np.asarray(u, dtype=float).ravel()
         y = np.asarray(y, dtype=float)
@@ -139,6 +143,9 @@ class LinearBasis(Representation):
     def fit(self, u, y, weight=None, fitter="least_squares", reg=None, **kw):
         uu, yy, ww = self._prepare(u, y, weight)
         A = self.basis_derivs(uu, 0)[0]
+        self._last_design = np.asarray(A, dtype=float)
+        self._last_weight = np.asarray(ww, dtype=float)
+        self._last_reg = reg
         self.coeffs = fit_linear(A, yy, ww, fitter=fitter, reg=reg, seed=self.seed, **kw)
         self.fitted = True
         return self
@@ -147,6 +154,42 @@ class LinearBasis(Representation):
         uu = np.asarray(u, dtype=float).ravel()
         mats = self.basis_derivs(uu, order)
         return np.stack([np.asarray(B @ self.coeffs, dtype=float) for B in mats], axis=2)
+
+    def diagnostics(self):
+        out = {}
+        A = getattr(self, "_last_design", None)
+        if A is None or A.size == 0:
+            return out
+        from .fitters import _reg_kind, diff_matrix
+
+        k = A.shape[1]
+        out["design_cond"] = float(np.linalg.cond(A))
+        out["design_rank"] = int(np.linalg.matrix_rank(A))
+        out["n_coeff"] = int(k)
+        w = self._last_weight
+        Aw = A * w[:, None]
+        ATA = Aw.T @ Aw
+        kind, lam, order = _reg_kind(getattr(self, "_last_reg", None))
+        P = None
+        if lam > 0 and kind == "diff":
+            P = np.sqrt(lam) * diff_matrix(k, order)
+        elif lam > 0 and kind == "ridge":
+            P = np.sqrt(lam) * np.eye(k)
+        if P is not None:
+            out["penalty_rank"] = int(np.linalg.matrix_rank(P))
+            out["penalty_nullity"] = int(k - out["penalty_rank"])
+            M = ATA + P.T @ P
+        else:
+            out["penalty_rank"] = 0
+            out["penalty_nullity"] = int(k)
+            M = ATA
+        try:
+            dof = float(np.trace(np.linalg.solve(M + 1e-12 * np.eye(k), ATA)))
+        except np.linalg.LinAlgError:
+            dof = float(k)
+        out["eff_dof"] = dof
+        out["eff_dof_ratio"] = dof / max(A.shape[0], 1)
+        return out
 
     @property
     def n_params(self):
@@ -230,6 +273,66 @@ class PSpline(BSpline):
 
     def fit(self, u, y, weight=None, fitter="least_squares", reg=None, **kw):
         return super().fit(u, y, weight=weight, fitter=fitter, reg=reg or self.default_reg, **kw)
+
+
+class PSplineGCV(PSpline):
+    """P-spline whose difference-penalty strength is chosen by GCV.
+
+    Replaces the hand-set ``lam`` with a generalized cross-validation scan over
+    decades, which is the "default vs tuned" control for the Iteration 1 claim
+    that ``lam ~ 1e-3`` closes the gap to GP.
+    """
+
+    name = "pspline_gcv"
+    citation = "wahba1990"
+
+    def __init__(self, positions=None, dim=DEFAULT_DIM, degree=3, lam_grid=None, seed=0, **kw):
+        super().__init__(positions, dim=dim, degree=degree, seed=seed, **kw)
+        if lam_grid is None:
+            lam_grid = [10.0 ** e for e in np.arange(-10.0, 1.01, 0.5)]
+        self.lam_grid = [float(v) for v in lam_grid]
+        self.gcv_lam = None
+
+    def fit(self, u, y, weight=None, fitter="least_squares", reg=None, **kw):
+        from .fitters import diff_matrix
+
+        uu, yy, ww = self._prepare(u, y, weight)
+        A = self.basis_derivs(uu, 0)[0]
+        Aw = A * ww[:, None]
+        yw = yy * ww[:, None]
+        k = A.shape[1]
+        n = len(uu)
+        D = diff_matrix(k, 2)
+        DtD = D.T @ D
+        ATA = Aw.T @ Aw
+        ATy = Aw.T @ yw
+        best = (np.inf, self.lam_grid[len(self.lam_grid) // 2])
+        for lam in self.lam_grid:
+            M = ATA + lam * DtD
+            try:
+                c = np.linalg.solve(M, ATy)
+                r = yw - Aw @ c
+                dof = float(np.trace(np.linalg.solve(M, ATA)))
+                denom = (1.0 - dof / max(n, 1)) ** 2
+                gcv = float(np.sum(r**2) / max(n, 1) / max(denom, 1e-12))
+            except np.linalg.LinAlgError:
+                continue
+            if np.isfinite(gcv) and gcv < best[0]:
+                best = (gcv, float(lam))
+        self.gcv_lam = best[1]
+        chosen = {"kind": "diff", "order": 2, "lam": self.gcv_lam}
+        self._last_design = np.asarray(A, dtype=float)
+        self._last_weight = np.asarray(ww, dtype=float)
+        self._last_reg = chosen
+        self.coeffs = fit_linear(A, yy, ww, fitter=fitter, reg=chosen, seed=self.seed, **kw)
+        self.fitted = True
+        return self
+
+    def diagnostics(self):
+        out = super().diagnostics()
+        if self.gcv_lam is not None:
+            out["gcv_lam"] = float(self.gcv_lam)
+        return out
 
 
 class Hermite(LinearBasis):
@@ -559,6 +662,23 @@ class GaussianProcess(Representation):
         sf2 = float(np.exp(self.log_params[1]))
         return np.sqrt(np.maximum(sf2 - np.sum(v**2, axis=0), 0.0))
 
+    def diagnostics(self):
+        out = {}
+        if self.inputs is None:
+            return out
+        sn2 = np.exp(self.log_params[2])
+        K = self._kernel(self.inputs, self.inputs, 0) + (sn2 + 1e-10) * np.eye(len(self.inputs))
+        out["gp_kernel_cond"] = float(np.linalg.cond(K))
+        out["gp_lengthscale"] = float(np.exp(self.log_params[0]))
+        out["gp_signal_var"] = float(np.exp(self.log_params[1]))
+        out["gp_noise_var"] = float(np.exp(self.log_params[2]))
+        out["gp_n_support"] = int(len(self.inputs))
+        try:
+            out["gp_nll"] = float(self._neg_log_marginal(self.log_params))
+        except Exception:
+            pass
+        return out
+
     @property
     def n_params(self):
         return 3
@@ -648,6 +768,11 @@ class DMP(Representation):
             out.append(spline.derivative(k)(uu) if k <= 3 else np.zeros((len(uu), self.dim)))
         return np.stack(out, axis=2)
 
+    def diagnostics(self):
+        if self.weights is None:
+            return {}
+        return {"dmp_weight_norm": float(np.linalg.norm(self.weights))}
+
     @property
     def n_params(self):
         return 0 if self.weights is None else int(self.weights.size + 2 * self.dim)
@@ -704,14 +829,31 @@ class TorchMLP(Representation):
         target = torch.tensor(yy, dtype=torch.float64)
         w = torch.tensor(ww, dtype=torch.float64)[:, None]
         loss_fn = torch.nn.MSELoss(reduction="none")
+        self._grad_norm = float("nan")
         for _ in range(iters):
             opt.zero_grad()
             pred = self.net(self._features(t))
             loss = (loss_fn(pred, target) * w).mean()
             loss.backward()
+            self._grad_norm = float(
+                torch.sqrt(sum((p.grad.detach() ** 2).sum() for p in self.net.parameters() if p.grad is not None))
+            )
             opt.step()
         self.fitted = True
         return self
+
+    def diagnostics(self):
+        import torch
+
+        if self.net is None:
+            return {}
+        with torch.no_grad():
+            pnorm = float(torch.sqrt(sum((p**2).sum() for p in self.net.parameters())))
+        return {
+            "mlp_param_norm": pnorm,
+            "mlp_grad_norm": getattr(self, "_grad_norm", float("nan")),
+            "mlp_fourier_scale": float(self.n_features),
+        }
 
     def eval_derivs(self, u, order=MAX_ORDER):
         import torch
@@ -783,6 +925,7 @@ REPRESENTATIONS = {
     "bspline5": lambda positions=None, **kw: BSpline(positions, degree=5, **kw),
     "bspline7": lambda positions=None, **kw: BSpline(positions, degree=7, **kw),
     "pspline": PSpline,
+    "pspline_gcv": PSplineGCV,
     "chebyshev": Chebyshev,
     "fourier": Fourier,
     "nurbs": NURBS,

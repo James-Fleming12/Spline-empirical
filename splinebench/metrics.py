@@ -12,6 +12,78 @@ def predict(motion, rep, time_param, t):
     return chain_rule_derivs(rep_state, u_state[:, None, :])
 
 
+def _subsample(a, n=96):
+    a = np.asarray(a, dtype=float)
+    if len(a) <= n:
+        return a
+    idx = np.linspace(0, len(a) - 1, n).round().astype(int)
+    return a[np.unique(idx)]
+
+
+def dtw_distance(a, b, n=96):
+    """Normalized dynamic time warping distance between two (T, d) paths."""
+    a = _subsample(a, n)
+    b = _subsample(b, n)
+    if len(a) == 0 or len(b) == 0:
+        return float("nan")
+    D = np.full((len(a), len(b)), np.inf)
+    for i in range(len(a)):
+        for j in range(len(b)):
+            cost = float(np.linalg.norm(a[i] - b[j]))
+            if i == 0 and j == 0:
+                D[i, j] = cost
+                continue
+            prev = np.inf
+            if i > 0:
+                prev = min(prev, D[i - 1, j])
+            if j > 0:
+                prev = min(prev, D[i, j - 1])
+            if i > 0 and j > 0:
+                prev = min(prev, D[i - 1, j - 1])
+            D[i, j] = cost + prev
+    return float(D[-1, -1] / (len(a) + len(b)))
+
+
+def phase_error(fit, gt):
+    """Normalized time shift (fraction of window) from max cross-correlation."""
+    fit = np.asarray(fit, dtype=float).ravel()
+    gt = np.asarray(gt, dtype=float).ravel()
+    if len(fit) != len(gt) or len(fit) < 3:
+        return float("nan")
+    f = fit - fit.mean()
+    g = gt - gt.mean()
+    denom = float(np.linalg.norm(f) * np.linalg.norm(g))
+    if denom <= 0:
+        return 0.0
+    lag = int(np.argmax(np.correlate(f, g, mode="full")) - (len(g) - 1))
+    return float(abs(lag) / max(len(fit) - 1, 1))
+
+
+def window_metrics(motion, rep, time_param, windows, grid_n=801, prefix="holdout_"):
+    """Position/derivative metrics restricted to one or more time windows."""
+    if isinstance(windows, tuple):
+        windows = [windows]
+    grids = [np.linspace(lo, hi, grid_n) for lo, hi in windows]
+    grid = np.unique(np.concatenate(grids))
+    state_fit = predict(motion, rep, time_param, grid)
+    state_gt = motion.eval_state(grid, order=MAX_ORDER)
+    window = motion.window[1] - motion.window[0]
+    out = {}
+    for k, name in ORDER_NAMES.items():
+        err = state_fit[..., k] - state_gt[..., k]
+        out[f"{prefix}{name}_rmse"] = float(np.sqrt(np.mean(err**2)))
+        if k > 0:
+            gt_rms = float(np.sqrt(np.mean(state_gt[..., k] ** 2)))
+            out[f"{prefix}{name}_nrmse"] = float(out[f"{prefix}{name}_rmse"] / (gt_rms + 1e-12))
+    axis = int(np.argmax(np.ptp(state_gt[..., 0], axis=0)))
+    gt_peak = grid[int(np.argmax(np.abs(state_gt[:, axis, 0])))]
+    fit_peak = grid[int(np.argmax(np.abs(state_fit[:, axis, 0])))]
+    out[f"{prefix}peak_time_err"] = float(abs(fit_peak - gt_peak) / window)
+    out[f"{prefix}phase_err"] = phase_error(state_fit[:, axis, 0], state_gt[:, axis, 0])
+    out[f"{prefix}dtw"] = dtw_distance(state_fit[..., 0], state_gt[..., 0])
+    return out
+
+
 def evaluate(motion, rep, time_param, grid=None, limits=None, fit_time_s=None,
              eval_time_s=None, u_train=None, y_train=None):
     if grid is None:
@@ -51,6 +123,9 @@ def evaluate(motion, rep, time_param, grid=None, limits=None, fit_time_s=None,
     tol = 0.05 * peak
     idx = np.flatnonzero(err_norm > tol)
     out["settle_time_err"] = float(grid[idx[-1]] - grid[0]) / window if len(idx) else 0.0
+
+    out["phase_err"] = phase_error(state_fit[:, gt_peak_axis, 0], state_gt[:, gt_peak_axis, 0])
+    out["dtw"] = dtw_distance(state_fit[..., 0], state_gt[..., 0])
 
     isj_fit = trapz(np.mean(state_fit[..., 3] ** 2, axis=1), grid)
     isj_gt = trapz(np.mean(state_gt[..., 3] ** 2, axis=1), grid)
